@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "upstream": "https://github.com/NousResearch/hermes-agent",
+  "baseline_commit": "f293e7206b4ddd66042329442c6afebc19a8808d",
+  "patch": "hermes-instruction-marker-fix.patch",
+  "patch_sha256": "a20411b31de2af990818120a7a6dc879f99889f0b90c7166d4a9206477bf0730",
+  "files_changed": [
+    "agent/coding_context.py",
+    "tests/agent/test_coding_context.py"
+  ],
+  "verification": {
+    "command": "python -m pytest tests/agent/test_coding_context.py tests/agent/test_verification_stop.py tests/run_agent/test_file_mutation_verifier.py -q",
+    "passed": 76,
+    "skipped": 1,
+    "warnings": 1
+  },
+  "external_effects": {
+    "live_install_modified": false,
+    "upstream_branch_created": false,
+    "upstream_issue_created": false,
+    "upstream_pull_request_created": false
+  }
+}

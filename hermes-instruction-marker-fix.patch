@@ -1,0 +1,148 @@
+diff --git a/agent/coding_context.py b/agent/coding_context.py
+index aa38305e0..fe80016eb 100644
+--- a/agent/coding_context.py
++++ b/agent/coding_context.py
+@@ -71,24 +71,28 @@ CODING_TOOLSET = "coding"
+ # in a group is not pair-programming.
+ INTERACTIVE_CODING_PLATFORMS = {"cli", "tui", "acp", "desktop", ""}
+ 
+-# Project-root signals that mark a directory as a code workspace even when it
++# Project manifests that mark a directory as a code workspace even when it
+ # isn't (yet) a git repo. Cheap filename checks — no parsing.
+-_PROJECT_MARKERS = (
++_MANIFEST_MARKERS = (
+     "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+     "package.json", "tsconfig.json", "deno.json",
+     "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
+     "Gemfile", "composer.json", "mix.exs", "pubspec.yaml",
+     "CMakeLists.txt", "Makefile", "Dockerfile",
+-    "AGENTS.md", "CLAUDE.md", ".cursorrules",
+ )
+ 
+ # Agent-instruction files surfaced separately from manifests in the snapshot.
+-_CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", ".cursorrules")
++_INSTRUCTION_MARKERS = ("AGENTS.md", "CLAUDE.md", ".cursorrules")
++_CONTEXT_FILES = _INSTRUCTION_MARKERS
+ 
+-# Source-file extensions that make a git repo a *code* workspace even with no
++# Retained as the complete enumeration consumed by project-fact snapshots.
++_PROJECT_MARKERS = _MANIFEST_MARKERS + _INSTRUCTION_MARKERS
++
++# Source-file extensions that corroborate a code workspace even with no
+ # manifest. Without this, `git init` on a notes/writing/research folder (a huge
+ # non-coding use case) would flip the whole session into the coding posture just
+-# for having a `.git`. A manifest still wins on its own (see `_PROJECT_MARKERS`).
++# for having a `.git`. A manifest still wins on its own; instruction markers
++# require this corroboration.
+ _CODE_EXTENSIONS = frozenset({
+     ".py", ".pyi", ".ipynb", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+     ".go", ".rs", ".java", ".kt", ".kts", ".scala", ".rb", ".php", ".c", ".h",
+@@ -103,6 +107,11 @@ _CODE_SCAN_SKIP_DIRS = frozenset({
+     "target", ".next", ".turbo", "vendor",
+ })
+ 
++# Conventional code roots may contain another package directory before source
++# files appear (for example ``src/pkg/main.py``). Descend those roots one extra
++# level without treating arbitrary nested vault/project folders as code signals.
++_CODE_SCAN_DEEP_DIRS = frozenset({"src", "app", "lib", "tests", "test"})
++
+ # Bounded sweep: a code workspace reveals itself in the first handful of entries.
+ _CODE_SCAN_MAX_ENTRIES = 500
+ 
+@@ -116,9 +125,9 @@ def _has_code_files(root: Path) -> bool:
+     a handful of readdirs at session start, not a full walk.
+     """
+     seen = 0
+-    stack = [(root, True)]
++    stack = [(root, 0)]
+     while stack:
+-        directory, is_root = stack.pop()
++        directory, depth = stack.pop()
+         try:
+             with os.scandir(directory) as entries:
+                 for entry in entries:
+@@ -130,8 +139,9 @@ def _has_code_files(root: Path) -> bool:
+                         if entry.is_file():
+                             if os.path.splitext(name)[1].lower() in _CODE_EXTENSIONS:
+                                 return True
+-                        elif is_root and entry.is_dir() and name not in _CODE_SCAN_SKIP_DIRS and not name.startswith("."):
+-                            stack.append((Path(entry.path), False))
++                        elif entry.is_dir() and name not in _CODE_SCAN_SKIP_DIRS and not name.startswith("."):
++                            if depth == 0 or (depth == 1 and directory.name in _CODE_SCAN_DEEP_DIRS):
++                                stack.append((Path(entry.path), depth + 1))
+                     except OSError:
+                         continue
+         except OSError:
+@@ -425,8 +435,13 @@ def _marker_root(cwd: Path) -> Optional[Path]:
+             break
+         if parent == home or (temp_root is not None and parent == temp_root):
+             continue
+-        for marker in _PROJECT_MARKERS:
+-            if (parent / marker).exists():
++        if any((parent / marker).exists() for marker in _MANIFEST_MARKERS):
++            return parent
++        if any((parent / marker).exists() for marker in _INSTRUCTION_MARKERS):
++            # Instruction files appear in prose vaults and other non-code
++            # workspaces. Require an actual source file before treating one as
++            # a code-project signal; manifests above remain dispositive.
++            if _has_code_files(parent):
+                 return parent
+     return None
+ 
+diff --git a/tests/agent/test_coding_context.py b/tests/agent/test_coding_context.py
+index 58ed8d992..6b9381d72 100644
+--- a/tests/agent/test_coding_context.py
++++ b/tests/agent/test_coding_context.py
+@@ -337,12 +337,51 @@ class TestProfiles:
+ # ── detection signals ───────────────────────────────────────────────────────
+ 
+ class TestDetection:
+-    @pytest.mark.parametrize("marker", ["pyproject.toml", "package.json", "go.mod", "AGENTS.md"])
++    @pytest.mark.parametrize("marker", ["pyproject.toml", "package.json", "go.mod"])
+     def test_project_manifest_triggers_without_git(self, tmp_path, marker):
+         (tmp_path / marker).write_text("x")
+         cfg = {"agent": {"coding_context": "auto"}}
+         assert cc.is_coding_context(platform="cli", cwd=tmp_path, config=cfg) is True
+ 
++    @pytest.mark.parametrize("marker", cc._INSTRUCTION_MARKERS)
++    def test_instruction_marker_alone_stays_general(self, tmp_path, marker):
++        (tmp_path / marker).write_text("# workspace instructions\n")
++        (tmp_path / "notes.md").write_text("# prose only\n")
++        cfg = {"agent": {"coding_context": "auto"}}
++        assert cc.is_coding_context(platform="cli", cwd=tmp_path, config=cfg) is False
++
++    @pytest.mark.parametrize("marker", cc._INSTRUCTION_MARKERS)
++    def test_instruction_marker_with_source_file_triggers(self, tmp_path, marker):
++        (tmp_path / marker).write_text("# workspace instructions\n")
++        (tmp_path / "main.py").write_text("print('hello')\n")
++        cfg = {"agent": {"coding_context": "auto"}}
++        assert cc.is_coding_context(platform="cli", cwd=tmp_path, config=cfg) is True
++
++    def test_instruction_marker_with_src_layout_triggers(self, tmp_path):
++        (tmp_path / "AGENTS.md").write_text("# workspace instructions\n")
++        package = tmp_path / "src" / "pkg"
++        package.mkdir(parents=True)
++        (package / "main.py").write_text("print('hello')\n")
++        cfg = {"agent": {"coding_context": "auto"}}
++        assert cc.is_coding_context(platform="cli", cwd=tmp_path, config=cfg) is True
++
++    def test_instruction_marker_ignores_code_in_arbitrary_nested_project(self, tmp_path):
++        (tmp_path / "AGENTS.md").write_text("# vault instructions\n")
++        nested = tmp_path / "projects" / "utility"
++        nested.mkdir(parents=True)
++        (nested / "main.py").write_text("print('nested project')\n")
++        cfg = {"agent": {"coding_context": "auto"}}
++        assert cc.is_coding_context(platform="cli", cwd=tmp_path, config=cfg) is False
++
++    def test_instruction_marker_with_manifest_triggers(self, tmp_path):
++        (tmp_path / "AGENTS.md").write_text("# workspace instructions\n")
++        (tmp_path / "package.json").write_text("{}\n")
++        cfg = {"agent": {"coding_context": "auto"}}
++        assert cc.is_coding_context(platform="cli", cwd=tmp_path, config=cfg) is True
++
++    def test_project_marker_union_remains_complete(self):
++        assert cc._PROJECT_MARKERS == cc._MANIFEST_MARKERS + cc._INSTRUCTION_MARKERS
++
+     def test_marker_in_parent_counts_from_subdir(self, tmp_path):
+         (tmp_path / "pyproject.toml").write_text("x")
+         sub = tmp_path / "src" / "pkg"
